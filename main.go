@@ -44,7 +44,7 @@ func download() {
 	log.SetFlags(0)
 
 	log.Println("Connecting to the update server...")
-	client := dropy.New(dropbox.New(dropbox.NewConfig("YOUR_CLIENT_TOKEN_HERE!!!")))
+	client := dropy.New(dropbox.New(dropbox.NewConfig("YOUR_DROPBOX_APP_CLIENT_KEY_HERE")))
 	log.Println("Building file index, please wait...\n")
 	ScanRemote(client, "/")
 	log.Println("Found", len(remoteFiles), "remote files, checking for need in update...")
@@ -60,7 +60,7 @@ func download() {
 		} else {
 			diff := localInfo.ModTime().Sub(fileInfo.ModTime())
 			// Check if fileModTime differs (local is older) or size mismatch exist
-			if localInfo.Size() != fileInfo.Size() || diff < (time.Duration(0)*time.Second) {
+			if diff < (time.Duration(0)*time.Second) || localInfo.Size() < fileInfo.Size() {
 				localExpiredFiles = append(localExpiredFiles, path)
 				expiredSize += int(fileInfo.Size())
 			}
@@ -68,6 +68,9 @@ func download() {
 		scanBar.Add(1)
 	}
 	fmt.Println(" Complete!\n")
+
+	missingSize = int(float32(missingSize) * (0.9))
+	expiredSize = int(float32(expiredSize) * (0.9))
 
 	localMissingFilesCount := len(localMissingFiles)
 	if localMissingFilesCount > 0 {
@@ -80,33 +83,54 @@ func download() {
 		for _, path := range localMissingFiles {
 			wg.Add(1)
 			go func(path string) {
+				defer wg.Done()
+
 				inFile, err := client.Download(path)
 				if err != nil {
-					log.Panic(err)
+					log.Println(err)
+					return
 				}
 
 				err = os.MkdirAll("."+filepath.Dir(path), 0666)
 				if err != nil {
-					log.Panic(err)
+					log.Println(err)
+					return
 				}
 
 				var out io.Writer
-				f, err := os.Create("." + path)
+				f, err := os.Create("." + path + ".foupdate")
 				if err != nil {
-					log.Panic(err)
+					log.Println(err)
+					return
 				}
 				out = f
-				defer f.Close()
 
 				out = io.MultiWriter(out, scanBar)
 				_, err = io.Copy(out, inFile)
 				if err != nil {
-					log.Panic(err)
+					log.Println(err)
+					return
 				}
-				wg.Done()
+
+				f.Close()
+
+				err = os.Rename("."+path+".foupdate", "."+path)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				if fileInfo, ok := remoteFiles[path]; ok {
+					err = os.Chtimes("."+path, fileInfo.ModTime(), fileInfo.ModTime())
+					if err != nil {
+						log.Println(err)
+						return
+					}
+				}
 			}(path)
 		}
 		wg.Wait()
+		scanBar.Add(missingSize)
 		fmt.Println(" Complete!\n")
 	}
 	localExpiredFilesCount := len(localExpiredFiles)
@@ -120,38 +144,58 @@ func download() {
 		for _, path := range localExpiredFiles {
 			wg.Add(1)
 			go func(path string) {
+				defer wg.Done()
+
 				inFile, err := client.Download(path)
 				if err != nil {
-					log.Panic(err)
-				}
-
-				err = os.Remove("." + path)
-				if err != nil {
-					log.Panic(err)
+					log.Println(err)
+					return
 				}
 
 				var out io.Writer
-				f, err := os.Create("." + path)
+				f, err := os.Create("." + path + ".foupdate")
 				if err != nil {
-					log.Panic(err)
+					log.Println(err)
+					return
 				}
-				defer f.Close()
 				out = f
 
 				out = io.MultiWriter(out, scanBar)
 				_, err = io.Copy(out, inFile)
 				if err != nil {
-					log.Panic(err)
+					log.Println(err)
+					return
 				}
 
-				wg.Done()
+				err = os.Remove("." + path)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				f.Close()
+
+				err = os.Rename("."+path+".foupdate", "."+path)
+				if err != nil {
+					log.Println(err)
+					return
+				}
+
+				if fileInfo, ok := remoteFiles[path]; ok {
+					err = os.Chtimes("."+path, fileInfo.ModTime(), fileInfo.ModTime())
+					if err != nil {
+						log.Println(err)
+						return
+					}
+				}
 			}(path)
 		}
 		wg.Wait()
+		scanBar.Add(expiredSize)
 		fmt.Println(" Complete\n")
 	}
-	log.Println("Everything is up to date!")
 
+	log.Println("Everything is up to date!")
 	fmt.Print("Press 'Enter' to exit...")
 	bufio.NewReader(os.Stdin).ReadBytes('\n')
 }
