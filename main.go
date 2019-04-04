@@ -60,7 +60,7 @@ func download() {
 		} else {
 			diff := localInfo.ModTime().Sub(fileInfo.ModTime())
 			// Check if fileModTime differs (local is older) or size mismatch exist
-			if diff < (time.Duration(0)*time.Second) || localInfo.Size() < fileInfo.Size() {
+			if diff < (time.Duration(0)*time.Second) /*|| localInfo.Size() < fileInfo.Size()*/ {
 				localExpiredFiles = append(localExpiredFiles, path)
 				expiredSize += int(fileInfo.Size())
 			}
