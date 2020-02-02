@@ -15,23 +15,33 @@ import (
 	dropy "github.com/tj/go-dropy"
 )
 
-var remoteDirs = map[string]os.FileInfo{}
-var remoteFiles = map[string]os.FileInfo{}
-var localMissingFiles = []string{}
-var localExpiredFiles = []string{}
+type FileEntry struct {
+	Info os.FileInfo
+	Location int
+}
+type PathEntry struct {
+	Path string
+	Location int
+}
+
+//var remoteDirs = map[string]os.FileInfo{}
+//var remoteFiles = map[string]os.FileInfo{}
+var remoteFiles = map[string]FileEntry{}
+var localMissingFiles = []PathEntry{}
+var localExpiredFiles = []PathEntry{}
 
 // ScanRemote creates an index of dropbox source
-func ScanRemote(client *dropy.Client, path string) {
+func ScanRemote(client *dropy.Client, path string, location int) {
 	files, err := client.List(path)
 	if err != nil {
 		log.Panic(err)
 	}
 	for _, fileInfo := range files {
 		if fileInfo.IsDir() {
-			remoteDirs[path+fileInfo.Name()] = fileInfo
-			ScanRemote(client, path+fileInfo.Name()+"/")
+			//remoteDirs[path+fileInfo.Name()] = fileInfo
+			ScanRemote(client, path+fileInfo.Name()+"/", location)
 		} else {
-			remoteFiles[path+fileInfo.Name()] = fileInfo
+			remoteFiles[path+fileInfo.Name()] = FileEntry{fileInfo, location}
 		}
 	}
 }
@@ -44,48 +54,50 @@ func download() {
 	log.SetFlags(0)
 
 	log.Println("Connecting to the update server...")
-	client := dropy.New(dropbox.New(dropbox.NewConfig("YOUR_DROPBOX_APP_CLIENT_KEY_HERE")))
+	clients := []*dropy.Client{
+		dropy.New(dropbox.New(dropbox.NewConfig("first key"))),
+		dropy.New(dropbox.New(dropbox.NewConfig("second key"))),
+	}
 	log.Println("Building file index, please wait...\n")
-	ScanRemote(client, "/")
+	for location, client := range clients {
+		ScanRemote(client, "/", location)
+	}
 	log.Println("Found", len(remoteFiles), "remote files, checking for need in update...")
 
-	missingSize := int(0)
-	expiredSize := int(0)
+	missingSize64 := int64(0)
+	expiredSize64 := int64(0)
 	scanBar := progressbar.New(len(remoteFiles))
-	for path, fileInfo := range remoteFiles {
+	for path, entry := range remoteFiles {
 		localInfo, err := os.Stat("." + path)
 		if err != nil {
-			localMissingFiles = append(localMissingFiles, path)
-			missingSize += int(fileInfo.Size())
+			localMissingFiles = append(localMissingFiles, PathEntry{path, entry.Location})
+			missingSize64 += int64(entry.Info.Size())
 		} else {
-			diff := localInfo.ModTime().Sub(fileInfo.ModTime())
+			diff := localInfo.ModTime().Sub(entry.Info.ModTime())
 			// Check if fileModTime differs (local is older) or size mismatch exist
 			if diff < (time.Duration(0)*time.Second) /*|| localInfo.Size() < fileInfo.Size()*/ {
-				localExpiredFiles = append(localExpiredFiles, path)
-				expiredSize += int(fileInfo.Size())
+				localExpiredFiles = append(localExpiredFiles, PathEntry{path, entry.Location})
+				expiredSize64 += int64(entry.Info.Size())
 			}
 		}
 		scanBar.Add(1)
 	}
 	fmt.Println(" Complete!\n")
 
-	missingSize = int(float32(missingSize) * (0.9))
-	expiredSize = int(float32(expiredSize) * (0.9))
+	missingSize := int(missingSize64/1000)
+	expiredSize := int(expiredSize64/1000)
 
 	localMissingFilesCount := len(localMissingFiles)
 	if localMissingFilesCount > 0 {
-		log.Println("Downloading", localMissingFilesCount, "missing files,", missingSize, "bytes in total...")
-		scanBar = progressbar.NewOptions(
-			int(missingSize),
-			progressbar.OptionSetBytes(int(missingSize)),
-		)
+		log.Println("Downloading", localMissingFilesCount, "missing files,", missingSize, "kilobytes in total...")
+		scanBar = progressbar.NewOptions(missingSize, progressbar.OptionSetRenderBlankState(true))
 		wg := sync.WaitGroup{}
-		for _, path := range localMissingFiles {
+		for _, entry := range localMissingFiles {
 			wg.Add(1)
-			go func(path string) {
+			go func(path string, location int) {
 				defer wg.Done()
 
-				inFile, err := client.Download(path)
+				inFile, err := clients[location].Download(path)
 				if err != nil {
 					log.Println(err)
 					return
@@ -105,7 +117,6 @@ func download() {
 				}
 				out = f
 
-				out = io.MultiWriter(out, scanBar)
 				_, err = io.Copy(out, inFile)
 				if err != nil {
 					log.Println(err)
@@ -120,33 +131,30 @@ func download() {
 					return
 				}
 
-				if fileInfo, ok := remoteFiles[path]; ok {
-					err = os.Chtimes("."+path, fileInfo.ModTime(), fileInfo.ModTime())
+				if fileEntry, ok := remoteFiles[path]; ok {
+					err = os.Chtimes("."+path, fileEntry.Info.ModTime(), fileEntry.Info.ModTime())
 					if err != nil {
 						log.Println(err)
 						return
 					}
+					scanBar.Add(int(fileEntry.Info.Size()/1000))
 				}
-			}(path)
+			}(entry.Path, entry.Location)
 		}
 		wg.Wait()
-		scanBar.Add(missingSize)
 		fmt.Println(" Complete!\n")
 	}
 	localExpiredFilesCount := len(localExpiredFiles)
 	if localExpiredFilesCount > 0 {
-		log.Println("Overriding", localExpiredFilesCount, "expired files,", expiredSize, "bytes in total...")
-		scanBar = progressbar.NewOptions(
-			int(expiredSize),
-			progressbar.OptionSetBytes(int(expiredSize)),
-		)
+		log.Println("Overriding", localExpiredFilesCount, "expired files,", expiredSize, "kilobytes in total...")
+		scanBar = progressbar.NewOptions(expiredSize, progressbar.OptionSetRenderBlankState(true))
 		wg := sync.WaitGroup{}
-		for _, path := range localExpiredFiles {
+		for _, entry := range localExpiredFiles {
 			wg.Add(1)
-			go func(path string) {
+			go func(path string, location int) {
 				defer wg.Done()
 
-				inFile, err := client.Download(path)
+				inFile, err := clients[location].Download(path)
 				if err != nil {
 					log.Println(err)
 					return
@@ -160,7 +168,6 @@ func download() {
 				}
 				out = f
 
-				out = io.MultiWriter(out, scanBar)
 				_, err = io.Copy(out, inFile)
 				if err != nil {
 					log.Println(err)
@@ -181,17 +188,17 @@ func download() {
 					return
 				}
 
-				if fileInfo, ok := remoteFiles[path]; ok {
-					err = os.Chtimes("."+path, fileInfo.ModTime(), fileInfo.ModTime())
+				if fileEntry, ok := remoteFiles[path]; ok {
+					err = os.Chtimes("."+path, fileEntry.Info.ModTime(), fileEntry.Info.ModTime())
 					if err != nil {
 						log.Println(err)
 						return
 					}
+					scanBar.Add(int(fileEntry.Info.Size()/1000))
 				}
-			}(path)
+			}(entry.Path, entry.Location)
 		}
 		wg.Wait()
-		scanBar.Add(expiredSize)
 		fmt.Println(" Complete\n")
 	}
 
